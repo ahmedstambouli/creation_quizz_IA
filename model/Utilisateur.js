@@ -8,6 +8,7 @@ const UtilisateurSchema=mongoos.Schema({
     correct:{type:Number},
     quiz_totale:{type:Number},
     score:{type:Number},
+    rank: {type:Number},
 
 
 })

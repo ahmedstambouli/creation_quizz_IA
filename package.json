@@ -18,6 +18,8 @@
     "mongoose": "^8.5.3",
     "node-telegram-bot-api": "^0.66.0",
     "openai": "^4.55.4",
+    "pdfkit": "^0.15.0",
+    "pdfkit-table": "^0.1.99",
     "test": "file:"
   }
 }
