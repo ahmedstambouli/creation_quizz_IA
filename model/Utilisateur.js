@@ -9,6 +9,8 @@ const UtilisateurSchema=mongoos.Schema({
     quiz_totale:{type:Number},
     score:{type:Number},
     rank: {type:Number},
+    dailyChallengeParticipation: { type: Number, default: 0 },
+    dailyChallengeCorrect: { type: Number, default: 0 } // Add this field
 
 
 })

@@ -6,9 +6,13 @@ const dotenv = require('dotenv');
 const PDFDocument = require('pdfkit');
 const fs = require('fs');
 const path = require('path');
+const cron = require('node-cron');
 const userModel = require("../model/Utilisateur");
 const Quiz = require('../model/Quizz');
 const ReponseUtilisateur = require('../model/ReponseUtilisateur');
+const DailyChallenge=require('../model/dailyChallengeSchema');
+const  generateDailyQuizQuestion  = require('./quizGeneration'); // A function to generate a quiz question
+
 dotenv.config(); // Load environment variables
 
 const app = express();
@@ -18,6 +22,34 @@ const TELEGRAM_BOT_TOKEN = "7123459278:AAGGY8MzuWi8ZvWeyJ00oCjNIyrN_9agvN4";
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 
 const userSessions = {};
+
+// Schedule a task to run daily at midnight
+cron.schedule('31  11 * * *', async () => {
+  try {
+    // Generate a new daily quiz question
+    const { question, answer } = await generateDailyQuizQuestion();
+
+    // Create and save the new daily challenge
+    const dailyChallenge = new DailyChallenge({
+      date: new Date(),
+      question,
+      answer,
+      usersParticipated: []
+    });
+
+    await dailyChallenge.save();
+    console.log('Daily challenge created:', question);
+
+    // Notify users about the daily challenge
+    const users = await userModel.find(); // Get all users
+    users.forEach(user => {
+      bot.sendMessage(user.id, `🎯 Challenge du jour ! 🎯\n\nQuestion : ${question}\nRépondez avec votre réponse.`);
+    });
+  } catch (error) {
+    console.error('Error creating daily challenge:', error.message);
+  }
+});
+
 
 
 async function calculateUserRank(userId) {
@@ -30,10 +62,66 @@ console.log(userIndex);
 }
 
 
+
+
+// Function to get top users
+async function getLeaderboard(chatId) {
+  try {
+    const topUsers = await userModel.find().sort({ score: -1 }).limit(10);
+    let leaderboardText = "meilleur utilisateur:\n\n";
+    topUsers.forEach((user, index) => {
+      leaderboardText += `${index + 1}. ${user.first_name} ${user.last_name} - ${user.score.toFixed(2)}%\n`;
+    });
+    bot.sendMessage(chatId,leaderboardText) ;
+  } catch (error) {
+    console.error("Error retrieving leaderboard:", error.message);
+    return "Désolé, je n'ai pas pu récupérer le classement.";
+  }
+}
+
+
 // Function to handle user responses based on their session state
 async function handleUserResponse(message) {
   const chatId = message.from.id;
   const text = message.text.toLowerCase();
+
+  // Récupérer le défi quotidien pour aujourd'hui
+  const dailyChallenge = await DailyChallenge.findOne().sort({ date: -1 });
+console.log(dailyChallenge);
+
+  if (dailyChallenge && !dailyChallenge.usersParticipated.includes(chatId)) {
+    if (text == dailyChallenge.answer.toLowerCase()) {
+      bot.sendMessage(chatId, "Bravo ! Vous avez répondu correctement au défi du jour !");
+      dailyChallenge.usersParticipated.push(chatId);
+      dailyChallenge.responses.push({
+        user: chatId,
+        userAnswer: text,
+        isCorrect: true
+      });
+      await dailyChallenge.save();
+
+      await userModel.findOneAndUpdate({ id: chatId }, { $inc: { correct: 1, dailyChallengeCorrect: 1,dailyChallengeParticipation:1 } });
+
+
+    } else {
+      bot.sendMessage(chatId, "Désolé, la réponse est incorrecte. Essayez demain !");
+      dailyChallenge.responses.push({
+        user: chatId,
+        userAnswer: text,
+        isCorrect: false
+      });
+      await dailyChallenge.save();
+      await userModel.findOneAndUpdate({ id: chatId }, { $inc: {dailyChallengeParticipation:1 } });
+
+    }
+    return;
+  }
+
+  if (text.includes("meilleur")) {
+    // Handle the "get leaderboard" command
+    await getLeaderboard(chatId);
+    return;
+  }
 
   if ( text.includes("rapport")) {
     // Send the PDF report when the user types "rapport"
@@ -213,14 +301,22 @@ async function checkUserAnswer(quizId, userAnswer) {
 
 
 function cleanText(text) {
-  // Enlève les guillemets autour du texte et nettoie les espaces superflus
-  return text.replace(/^"|"$/g, '').trim();
+  // Remove any content inside angle brackets, along with the brackets themselves
+  text = text.replace(/<[^>]*>/g, '');
+
+  // Remove any non-alphabetic characters
+  return text.replace(/[^a-zA-Z]/g, '').trim();
 }
+
+// Example usage
+const cleanedText = cleanText('ahmed@<>');
+console.log(cleanedText); // Output: "ahmed"
+
+
 
 // ! get statestique apré terminer le quiz 
 async function getUserStatistics(chatId) {
   try {
-    // Retrieve the user from the database
     const user = await userModel.findOne({ id: chatId });
 
     if (!user) {
@@ -302,10 +398,9 @@ async function sendPDFReport(chatId, idtelegrame) {
     // Générer le rapport PDF
     const filePath = await generatePDFReport(idtelegrame);
 
-    // Envoyer le fichier PDF à l'utilisateur avec le type de contenu spécifié
     await bot.sendDocument(chatId, filePath, {}, { contentType: 'application/pdf' });
 
-    // Nettoyer le fichier après l'envoi
+    
     fs.unlink(filePath, (err) => {
       if (err) {
         console.error(`Erreur lors de la suppression du fichier ${filePath} :`, err.message);
@@ -323,7 +418,6 @@ async function sendPDFReport(chatId, idtelegrame) {
 async function generatePDFReport(idtelegrame) {
   const reportsDir = path.join(__dirname, 'reports');
 
-  // Vérifier si le répertoire des rapports existe, et le créer s'il n'existe pas
   if (!fs.existsSync(reportsDir)) {
     fs.mkdirSync(reportsDir, { recursive: true });
   }
@@ -331,14 +425,12 @@ async function generatePDFReport(idtelegrame) {
   const filePath = path.join(reportsDir, `user_${idtelegrame}_report.pdf`);
   const doc = new PDFDocument();
 
-  // Créer un flux d'écriture pour écrire le fichier PDF
   const writeStream = fs.createWriteStream(filePath);
   doc.pipe(writeStream);
 
   doc.fontSize(18).text('Rapport de Réponses de l\'Utilisateur', { align: 'center' });
   doc.moveDown();
 
-  // Récupérer les réponses des utilisateurs en utilisant idtelegrame
   const responses = await ReponseUtilisateur.find({ idtelegrame }).populate('quizId');
 
   if (responses.length === 0) {
